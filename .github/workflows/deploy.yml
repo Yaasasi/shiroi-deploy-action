@@ -4,9 +4,6 @@ on:
   push:
     branches:
       - main
-    tags:
-      - "v*"
-      - "*"
   workflow_dispatch:
     inputs:
       force:
@@ -100,7 +97,7 @@ jobs:
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:
-          version: 10.14.0   # 与 packageManager 对齐
+          version: 10.14.0   # ← 对齐 package.json 的 packageManager
 
       - name: Use Node.js ${{ matrix.node-version }}
         uses: actions/setup-node@v4
@@ -145,25 +142,13 @@ jobs:
           path: assets
           key: ${{ github.run_number }}-release
 
-  deploy:
-    name: Deploy artifact (remote)
+  # ----------------------- 新增：发布到 Releases -----------------------
+  release:
+    name: Publish GitHub Release
     runs-on: ubuntu-latest
     needs: build
-    if: ${{ vars.ENABLE_REMOTE_DEPLOY == 'true' }}
+    if: ${{ needs.build.result == 'success' }}
+    permissions:
+      contents: write
     steps:
       - name: Download artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: shiroi-${{ needs.build.outputs.sha_short }}
-          path: .
-
-      - name: Ensure release.zip present
-        run: |
-          test -f release.zip || mv assets/release.zip release.zip || echo 'release.zip already at root'
-
-      - name: copy file via ssh password
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: ${{ secrets.HOST }}
-          username: ${{ secrets.USER }}
-          passw
