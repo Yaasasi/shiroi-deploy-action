@@ -4,12 +4,17 @@ on:
   push:
     branches:
       - main
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Force build (ignore HASH_FILE)'
+        required: false
+        default: 'false'
   repository_dispatch:
     types: [trigger-workflow]
 
 permissions: write-all
 
-# 顶层 env 仅保留一份
 env:
   HASH_FILE: build_hash
 
@@ -30,20 +35,43 @@ jobs:
       - name: Read HASH_FILE content
         id: read_hash
         run: |
-          content=$(cat ${{ env.HASH_FILE }}) || true
+          content=""
+          if [ -f "${{ env.HASH_FILE }}" ]; then
+            content=$(cat "${{ env.HASH_FILE }}" || true)
+          fi
           echo "hash_content=$content" >> $GITHUB_OUTPUT
 
   check:
-    name: Check cancel
+    name: Check need cancel
     runs-on: ubuntu-latest
     needs: prepare
     outputs:
-      canceled: ${{ steps.check.outputs.canceled }}
+      canceled: ${{ steps.decide.outputs.canceled }}
     steps:
-      - name: Check need cancel
-        id: check
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Decide to cancel
+        id: decide
+        shell: bash
+        env:
+          HASH_CONTENT: ${{ needs.prepare.outputs.hash_content }}
+          FORCE_BUILD_INPUT: ${{ github.event.inputs.force }}
         run: |
-          if [ -n "${{ needs.prepare.outputs.hash_content }}" ]; then
+          set -e
+          # FORCE_BUILD 开关：workflow_dispatch: force=true 时强制构建
+          if [ "${FORCE_BUILD_INPUT}" = "true" ]; then
+            echo "canceled=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          # 也支持仓库变量强制构建（Settings → Variables）
+          if [ "${{ vars.FORCE_BUILD }}" = "true" ]; then
+            echo "canceled=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          CURRENT_SHA_SHORT=$(git rev-parse --short HEAD)
+          # 仅当 HASH_FILE 存在且值等于当前短 SHA 才取消
+          if [ -n "${HASH_CONTENT}" ] && [ "${HASH_CONTENT}" = "${CURRENT_SHA_SHORT}" ]; then
             echo "canceled=true" >> $GITHUB_OUTPUT
           else
             echo "canceled=false" >> $GITHUB_OUTPUT
@@ -87,7 +115,6 @@ jobs:
         run: |
           sh ./ci-release-build.sh
 
-      # 先生成 meta，再用于命名 artifact
       - name: Store commit metadata
         id: meta
         shell: bash
@@ -102,10 +129,10 @@ jobs:
         with:
           name: shiroi-${{ steps.meta.outputs.sha_short }}
           path: assets/release.zip
+          if-no-files-found: error
           retention-days: 30
 
-      # 可选：仍然保存 assets 缓存
-      - name: Cache Build Artifacts
+      - name: Cache Build Artifacts (optional)
         id: cache-primes
         uses: actions/cache/save@v4
         with:
@@ -116,7 +143,7 @@ jobs:
     name: Deploy artifact (remote)
     runs-on: ubuntu-latest
     needs: build
-    # 通过“仓库变量”启用：Settings → Variables → Repository variables → ENABLE_REMOTE_DEPLOY='true'
+    # 通过仓库变量启用：Settings → Variables → ENABLE_REMOTE_DEPLOY='true'
     if: ${{ vars.ENABLE_REMOTE_DEPLOY == 'true' }}
     steps:
       - name: Download artifact
@@ -176,7 +203,6 @@ jobs:
     name: Store artifact commit version
     runs-on: ubuntu-latest
     needs: build
-    # 无论 deploy 是否被跳过都更新 hash
     if: ${{ always() }}
     steps:
       - name: Checkout
