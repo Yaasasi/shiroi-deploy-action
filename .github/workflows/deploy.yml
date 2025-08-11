@@ -59,18 +59,17 @@ jobs:
           FORCE_BUILD_INPUT: ${{ github.event.inputs.force }}
         run: |
           set -e
-          # FORCE_BUILD 开关：workflow_dispatch: force=true 时强制构建
+          # 手动强制构建
           if [ "${FORCE_BUILD_INPUT}" = "true" ]; then
             echo "canceled=false" >> $GITHUB_OUTPUT
             exit 0
           fi
-          # 也支持仓库变量强制构建（Settings → Variables）
+          # 仓库变量强制构建（可选）
           if [ "${{ vars.FORCE_BUILD }}" = "true" ]; then
             echo "canceled=false" >> $GITHUB_OUTPUT
             exit 0
           fi
           CURRENT_SHA_SHORT=$(git rev-parse --short HEAD)
-          # 仅当 HASH_FILE 存在且值等于当前短 SHA 才取消
           if [ -n "${HASH_CONTENT}" ] && [ "${HASH_CONTENT}" = "${CURRENT_SHA_SHORT}" ]; then
             echo "canceled=true" >> $GITHUB_OUTPUT
           else
@@ -89,11 +88,13 @@ jobs:
       sha_short: ${{ steps.meta.outputs.sha_short }}
       branch: ${{ steps.meta.outputs.branch }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout Shiroi (private)
+        uses: actions/checkout@v4
         with:
-          repository: innei-dev/shiroi
+          repository: innei-dev/Shiroi   # 注意大小写
           ref: main
           fetch-depth: 0
+          token: ${{ secrets.GH_PAT }}   # 需要有 repo 权限且对 Shiroi 有访问
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
@@ -132,6 +133,7 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+      # 可选：保留 assets 目录缓存
       - name: Cache Build Artifacts (optional)
         id: cache-primes
         uses: actions/cache/save@v4
@@ -143,7 +145,7 @@ jobs:
     name: Deploy artifact (remote)
     runs-on: ubuntu-latest
     needs: build
-    # 通过仓库变量启用：Settings → Variables → ENABLE_REMOTE_DEPLOY='true'
+    # 通过仓库变量启用：Settings → Variables → Repository variables → ENABLE_REMOTE_DEPLOY='true'
     if: ${{ vars.ENABLE_REMOTE_DEPLOY == 'true' }}
     steps:
       - name: Download artifact
