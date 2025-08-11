@@ -59,12 +59,10 @@ jobs:
           FORCE_BUILD_INPUT: ${{ github.event.inputs.force }}
         run: |
           set -e
-          # 手动强制构建
           if [ "${FORCE_BUILD_INPUT}" = "true" ]; then
             echo "canceled=false" >> $GITHUB_OUTPUT
             exit 0
           fi
-          # 仓库变量强制构建（可选）
           if [ "${{ vars.FORCE_BUILD }}" = "true" ]; then
             echo "canceled=false" >> $GITHUB_OUTPUT
             exit 0
@@ -91,15 +89,15 @@ jobs:
       - name: Checkout Shiroi (private)
         uses: actions/checkout@v4
         with:
-          repository: innei-dev/Shiroi   # 注意大小写
+          repository: innei-dev/Shiroi
           ref: main
           fetch-depth: 0
-          token: ${{ secrets.GH_PAT }}   # 需要有 repo 权限且对 Shiroi 有访问
+          token: ${{ secrets.GH_PAT }}
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:
-          version: 9
+          version: 10.14.0   # ← 对齐 package.json 的 packageManager
 
       - name: Use Node.js ${{ matrix.node-version }}
         uses: actions/setup-node@v4
@@ -115,6 +113,10 @@ jobs:
       - name: Build project
         run: |
           sh ./ci-release-build.sh
+
+      - name: Ensure artifact exists
+        run: |
+          test -f assets/release.zip || (echo "assets/release.zip not found"; ls -la assets || true; exit 1)
 
       - name: Store commit metadata
         id: meta
@@ -133,7 +135,6 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      # 可选：保留 assets 目录缓存
       - name: Cache Build Artifacts (optional)
         id: cache-primes
         uses: actions/cache/save@v4
@@ -145,7 +146,6 @@ jobs:
     name: Deploy artifact (remote)
     runs-on: ubuntu-latest
     needs: build
-    # 通过仓库变量启用：Settings → Variables → Repository variables → ENABLE_REMOTE_DEPLOY='true'
     if: ${{ vars.ENABLE_REMOTE_DEPLOY == 'true' }}
     steps:
       - name: Download artifact
