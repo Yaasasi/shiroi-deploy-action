@@ -50,7 +50,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
       - name: Decide to cancel
         id: decide
         shell: bash
@@ -97,7 +96,7 @@ jobs:
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:
-          version: 10.14.0   # ← 对齐 package.json 的 packageManager
+          version: 10.14.0
 
       - name: Use Node.js ${{ matrix.node-version }}
         uses: actions/setup-node@v4
@@ -142,13 +141,10 @@ jobs:
           path: assets
           key: ${{ github.run_number }}-release
 
-  # ----------------------- 新增：发布到 Releases -----------------------
   release:
     name: Publish GitHub Release
     runs-on: ubuntu-latest
     needs: build
     if: ${{ needs.build.result == 'success' }}
     permissions:
-      contents: write
-    steps:
-      - name: Download artifact
+      contents: writ
