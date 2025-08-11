@@ -1,113 +1,204 @@
-name: Build Shiroi (Artifact)
+name: Build and Deploy
 
 on:
   push:
-    branches: [ main ]
-  workflow_dispatch: {}
-  # 也可按需启用定时构建
+    branches:
+      - main
   # schedule:
-  #   - cron: "0 3 * * *"
+  #   - cron: '0 3 * * *'
+  repository_dispatch:
+    types: [trigger-workflow]
 
-permissions:
-  contents: write    # 用于发布 Release
-  actions: read
+permissions: write-all
+
+# 新增：默认关闭远程部署；如需继续远程部署，改为 'true'
+env:
+  ENABLE_REMOTE_DEPLOY: 'false'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  HASH_FILE: build_hash
+
 jobs:
-  build:
-    name: Build artifact
+  prepare:
+    name: Prepare
     runs-on: ubuntu-latest
-
+    if: ${{ github.event.head_commit.message != 'Update hash file' }}
     outputs:
-      artifact_name: ${{ steps.prep.outputs.artifact_name }}
-
+      hash_content: ${{ steps.read_hash.outputs.hash_content }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+      - name: Read HASH_FILE content
+        id: read_hash
+        run: |
+          content=$(cat ${{ env.HASH_FILE }}) || true
+          echo "hash_content=$content" >> $GITHUB_OUTPUT
+
+  check:
+    name: Check cancel
+    runs-on: ubuntu-latest
+    needs: prepare
+    outputs:
+      canceled: ${{ steps.check.outputs.canceled }}
+    steps:
+      - name: Check need cancel
+        id: check
+        run: |
+          if [ -n "${{ needs.prepare.outputs.hash_content }}" ]; then
+            echo "canceled=true" >> $GITHUB_OUTPUT
+          else
+            echo "canceled=false" >> $GITHUB_OUTPUT
+          fi
+
+  build:
+    name: Build artifact
+    runs-on: ubuntu-latest
+    needs: check
+    if: ${{ needs.check.outputs.canceled != 'true' }}
+    strategy:
+      matrix:
+        node-version: [lts/*]
+    outputs:
+      sha_short: ${{ steps.store.outputs.sha_short }}
+      branch: ${{ steps.store.outputs.branch }}
+    steps:
+      - uses: actions/checkout@v4
         with:
+          repository: innei-dev/shiroi
+          ref: main
           fetch-depth: 0
 
-      - name: Setup PNPM
+      - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:
           version: 9
 
-      - name: Setup Node
+      - name: Use Node.js ${{ matrix.node-version }}
         uses: actions/setup-node@v4
         with:
-          node-version: 20
-          cache: "pnpm"
+          node-version: ${{ matrix.node-version }}
+          cache: 'pnpm'
 
-      - name: Install deps
-        run: pnpm install --frozen-lockfile
+      - uses: jongwooo/next-cache@v1
 
-      # 你若在 next.config.* 中启用了 output: "standalone"，这一步会生成 .next/standalone
-      - name: Build
-        run: pnpm build
+      - name: Install dependencies
+        run: pnpm install
 
-      - name: Prepare release zip
-        id: prep
-        shell: bash
+      - name: Build project
         run: |
-          set -euo pipefail
-          SHA_SHORT=$(git rev-parse --short HEAD)
-          NAME="shiroi-${SHA_SHORT}.zip"
-          mkdir -p dist
+          sh ./ci-release-build.sh
 
-          if [ -d ".next/standalone" ]; then
-            # 优先使用 Next standalone，包含最小 node_modules，可直接 node server.js 跑
-            mkdir -p dist/standalone
-            cp -r .next/standalone/* dist/standalone/
-            mkdir -p dist/standalone/.next
-            cp -r .next/static dist/standalone/.next/static
-            [ -d public ] && cp -r public dist/standalone/public || true
-            cp package.json dist/standalone/package.json
-            # 可选：把启动脚本名统一
-            if [ -f dist/standalone/server.js ]; then
-              :
-            elif [ -f dist/standalone/server.mjs ]; then
-              mv dist/standalone/server.mjs dist/standalone/server.js
-            fi
-          else
-            # 兜底：没有 standalone 时，打包常规 build 结果（本地需再安装依赖）
-            cp -r .next dist/.next
-            [ -d public ] && cp -r public dist/public || true
-            cp package.json dist/package.json
-          fi
-
-          # 附上环境模板（若存在）
-          [ -f .env.example ] && cp .env.example dist/.env.example || true
-
-          (cd dist && zip -qr "../${NAME}" .)
-          echo "artifact_name=${NAME}" >> "$GITHUB_OUTPUT"
-
-      - name: Upload artifact
+      # 新增：上传构建产物到 GitHub（可在 Actions 页面下载）
+      - name: Upload build artifact to GitHub
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ steps.prep.outputs.artifact_name }}
-          path: ${{ steps.prep.outputs.artifact_name }}
-          if-no-files-found: error
+          name: shiroi-${{ steps.store.outputs.sha_short }}
+          path: assets/release.zip
           retention-days: 30
 
-  release:
-    name: Publish Release on tag
+      # （可留作二选一）保留/删除均可：如果你仍想用 cache，请保留下面这段
+      - name: Cache Build Artifacts
+        id: cache-primes
+        uses: actions/cache/save@v4
+        with:
+          path: assets
+          key: ${{ github.run_number }}-release
+
+      - name: Store artifact commit version
+        id: store
+        shell: bash
+        run: |
+          sha_short=$(git rev-parse --short HEAD)
+          branch_name=$(git rev-parse --abbrev-ref HEAD)
+          echo "sha_short=$sha_short" >> "$GITHUB_OUTPUT"
+          echo "branch=$branch_name" >> "$GITHUB_OUTPUT"
+
+  deploy:
+    name: Deploy artifact (remote)
     runs-on: ubuntu-latest
     needs: build
-    if: startsWith(github.ref, 'refs/tags/')
-
+    # 新增：受环境变量开关控制；默认为 false 不执行远程部署
+    if: ${{ env.ENABLE_REMOTE_DEPLOY == 'true' }}
     steps:
+      # 改为从 artifact 下载 release.zip（不再只依赖 cache）
       - name: Download artifact
         uses: actions/download-artifact@v4
         with:
-          name: ${{ needs.build.outputs.artifact_name }}
+          name: shiroi-${{ needs.build.outputs.sha_short }}
+          path: .
 
-      - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v2
+      - name: Ensure release.zip present
+        run: |
+          test -f release.zip || mv assets/release.zip release.zip || echo 'release.zip already at root'
+
+      # 如需继续远程部署则保留以下两步（scp + ssh）
+      - name: copy file via ssh password
+        uses: appleboy/scp-action@v0.1.7
         with:
-          files: |
-            ${{ needs.build.outputs.artifact_name }}
+          host: ${{ secrets.HOST }}
+          username: ${{ secrets.USER }}
+          password: ${{ secrets.PASSWORD }}
+          key: ${{ secrets.KEY }}
+          port: ${{ secrets.PORT }}
+          source: 'release.zip'
+          target: '/tmp/shiro'
+
+      - name: Exec deploy script with SSH
+        uses: appleboy/ssh-action@master
+        with:
+          command_timeout: 5m
+          host: ${{ secrets.HOST }}
+          username: ${{ secrets.USER }}
+          password: ${{ secrets.PASSWORD }}
+          key: ${{ secrets.KEY }}
+          port: ${{ secrets.PORT }}
+          script_stop: true
+          script: |
+            set -euxo pipefail
+            basedir=/home/${{ secrets.USER }}/www/shiro
+            workdir=/tmp/shiro
+            mkdir -p $basedir $workdir
+            cd $workdir
+            unzip -o release.zip
+            # === 你原有的 PM2/链接/清理逻辑 ===
+            if [ -f $basedir/ecosystem.config.js ]; then
+              cp $basedir/ecosystem.config.js $workdir/standalone/ecosystem.config.js
+            else
+              cp $workdir/standalone/ecosystem.config.js $basedir/ecosystem.config.js
+            fi
+            ln -sf $workdir/standalone/server.js $basedir/server.js
+            mkdir -p $workdir/standalone/.next
+            rm -rf $workdir/standalone/.next/cache
+            ln -sf $basedir/.cache $workdir/standalone/.next/cache
+            cd $basedir
+            pm2 reload ecosystem.config.js --update-env
+            rm $workdir/release.zip
+            pm2 save
+            echo "Deployed successfully"
+
+  store:
+    name: Store artifact commit version
+    runs-on: ubuntu-latest
+    needs: [deploy, build]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Update HASH_FILE
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SHA_SHORT: ${{ needs.build.outputs.sha_short }}
+        run: echo $SHA_SHORT > ${{ env.HASH_FILE }}
+      - name: Commit files
+        run: |
+          git config --local user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add ${{ env.HASH_FILE }}
+          git commit -a -m "Update hash file" || echo "no changes"
+      - name: Push changes
+        uses: ad-m/github-push-action@master
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          branch: ${{ github.ref }}
